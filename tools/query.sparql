@@ -1,0 +1,55 @@
+SELECT
+	?country
+	?countryLabel
+	(GROUP_CONCAT(DISTINCT ?altName; separator="$DIVIDE$") AS ?altNames)
+	(GROUP_CONCAT(DISTINCT ?capitalLabel; separator="$DIVIDE$") AS ?capitals)
+	(GROUP_CONCAT(DISTINCT ?continentLabel; separator="$DIVIDE$") AS ?continents)
+WHERE {
+	SERVICE wikibase:label {
+		bd:serviceParam wikibase:language "en,mul".
+		?capital rdfs:label ?capitalLabel.
+		?continent rdfs:label ?continentLabel.
+		?country rdfs:label ?countryLabel.
+	}.
+
+	{
+		?country wdt:P31 wd:Q3624078. # sovereign states as listed by Wikidata
+		FILTER(?country != wd:Q756617) # not the whole Kingdom of Denmark
+	} UNION {
+		?country wdt:P31 wd:Q66724388. # constituent countries of the Kingdom of Denmark
+	} UNION {
+		VALUES (?country) {
+			# (partially) unrecognised states
+			(wd:Q1246) # Kosovo
+			(wd:Q34754) # Somaliland
+			(wd:Q907112) # Transnistria
+			(wd:Q2842000) # Ambazonia
+			(wd:Q31354462) # Abkhazia
+			(wd:Q23427) # South Ossetia
+			(wd:Q23681) # Northern Cyprus
+			(wd:Q40362) # Western Sahara
+			# dependent countries of New Zealand
+			(wd:Q34020) # Niue
+			(wd:Q26988) # Cook Islands
+		}
+	}
+
+	# no dissolved countries
+	FILTER NOT EXISTS{ ?country wdt:P576 ?date }
+
+	OPTIONAL { ?country wdt:P36 ?capital }.
+
+	OPTIONAL {
+		?country p:P30 ?st.
+		?st ps:P30 ?continent.
+		MINUS { ?st wikibase:rank wikibase:DeprecatedRank }
+		MINUS { ?st pqv:P582 ?continentEndTime }
+	}
+
+	OPTIONAL {
+		?country skos:altLabel ?altName.
+		FILTER (lang(?altName) = "en")
+	}
+}
+GROUP BY ?country ?countryLabel
+
