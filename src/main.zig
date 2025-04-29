@@ -251,35 +251,13 @@ const CheckResult = union(enum) {
     finished,
 };
 
-fn hsvToRgb(h: f32, s: f32, v: f32) @Vector(3, f32) {
-    if (s == 0) {
-        return .{ v, v, v };
-    } else {
-        var var_h = h * 6;
-        if (var_h == 6) var_h = 0;
-        const var_i = std.math.floor(var_h);
-        const v1 = v * (1 - s);
-        const v2 = v * (1 - s * (var_h - var_i));
-        const v3 = v * (1 - s * (1 - var_h + var_i));
-
-        switch (@as(usize, @intFromFloat(var_i))) {
-            0 => return .{ v, v3, v1 },
-            1 => return .{ v2, v, v1 },
-            2 => return .{ v1, v, v3 },
-            3 => return .{ v1, v2, v },
-            4 => return .{ v3, v1, v },
-            5 => return .{ v, v1, v2 },
-            else => unreachable,
-        }
-    }
-}
-
 const State = struct {
     size: RawTerm.Size,
     map: countries.ContinentMap,
     input: Input,
     last_found: ?*const Country = null,
     hint: Hint,
+    elapsed_ns: u64,
 
     pub fn check(state: *State) !CheckResult {
         var buf: [1024]u8 = undefined;
@@ -295,6 +273,17 @@ const State = struct {
         return .not_found;
     }
 
+    pub fn fmtTime(elapsed_ns: u64, buf: []u8) ![]u8 {
+        const secs = elapsed_ns / std.time.ns_per_s;
+        const mins = elapsed_ns / std.time.ns_per_min;
+        const hours = elapsed_ns / std.time.ns_per_hour;
+        if (hours == 0) {
+            return std.fmt.bufPrint(buf, "{:02}:{:02}", .{ mins % 60, secs % 60 });
+        } else {
+            return std.fmt.bufPrint(buf, "{}:{:02}:{:02}", .{ hours, mins % 60, secs % 60 });
+        }
+    }
+
     pub fn render(state: *const State, raw_term: *RawTerm) !void {
         try raw_term.out.writer().print(
             ansi.clear.screen ++ ansi.cursor.goto_top_left ++ "\x1b[{}H",
@@ -303,8 +292,16 @@ const State = struct {
 
         try raw_term.out.writer().print("{s:^[1]}\n\r", .{ "Country Naming Game", state.size.width });
 
+        {
+            var buf: [32]u8 = undefined;
+            try raw_term.out.writer().print(
+                "\x1b[30m{s:^[1]}\n\r" ++ ansi.style.reset,
+                .{ try fmtTime(state.elapsed_ns, &buf), state.size.width },
+            );
+        }
+
         inline for (comptime std.enums.values(Continent)) |continent| {
-            try raw_term.out.writer().print("\n\r {s:<16}", .{continent.name()});
+            try raw_term.out.writer().print(ansi.style.bold.enable ++ "\n\r {s:<16}" ++ ansi.style.reset, .{continent.name()});
 
             const count = state.map.count(continent);
             const width = state.size.width -| 18;
@@ -349,9 +346,9 @@ const State = struct {
             .capital => |capital| {
                 const country = capital.country;
                 if (country.capitals.len > capital.index) {
-                    try raw_term.out.writer().print("\n\r Hint: {s} is the capital of a country which hasn't been found", .{country.capitals[capital.index]});
+                    try raw_term.out.writer().print(ansi.style.bold.enable ++ "\n\r Hint:" ++ ansi.style.reset ++ " {s} is the capital of a country which hasn't been found", .{country.capitals[capital.index]});
                 } else {
-                    try raw_term.out.writeAll("\n\r Hint: a country without a capital city has not been found");
+                    try raw_term.out.writeAll(ansi.style.bold.enable ++ "\n\r Hint:" ++ ansi.style.reset ++ " a country without a capital city has not been found");
                 }
             },
         }
@@ -380,25 +377,21 @@ pub fn main() !void {
         .map = map,
         .input = .init(allocator),
         .hint = .new(&map, rng.random()),
+        .elapsed_ns = 0,
     };
     defer state.map.deinit();
     defer state.input.deinit();
+
+    var timer = try std.time.Timer.start();
 
     try state.render(&raw_term);
 
     while (true) {
         const event = try listener.queue.wait();
+        state.elapsed_ns = timer.read();
         switch (event) {
-            .special => |special| switch (special.key) {
-                .esc => break,
-                else => {
-                    try state.input.handleEvent(event);
-                    try state.render(&raw_term);
-                },
-            },
             .resize => {
                 state.size = try raw_term.size();
-                try state.render(&raw_term);
             },
             .char => |char| switch (char.value) {
                 '\r' => {
@@ -410,8 +403,10 @@ pub fn main() !void {
                         },
                         .not_found => {},
                         .finished => {
+                            var buf: [32]u8 = undefined;
                             while (true) {
                                 try raw_term.out.writeAll(ansi.clear.screen ++ ansi.cursor.goto_top_left ++ "You won (press any key to exit)");
+                                try raw_term.out.writer().print("\n\rTime: {s}", .{try State.fmtTime(state.elapsed_ns, &buf)});
                                 const ev = try listener.queue.wait();
                                 switch (ev) {
                                     .resize => {},
@@ -421,14 +416,20 @@ pub fn main() !void {
                             break;
                         },
                     }
-                    try state.render(&raw_term);
+                },
+                'q' => if (char.ctrl) {
+                    break;
+                } else {
+                    try state.input.handleEvent(event);
                 },
                 else => {
                     try state.input.handleEvent(event);
-                    try state.render(&raw_term);
                 },
             },
-            else => {},
+            else => {
+                try state.input.handleEvent(event);
+            },
         }
+        try state.render(&raw_term);
     }
 }
