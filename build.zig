@@ -40,15 +40,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const ansio = b.dependency("ansio", .{});
+    const vaxis = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
-    exe_mod.addImport("RawTerm", ansio.module("RawTerm"));
+    exe_mod.addImport("vaxis", vaxis.module("vaxis"));
+
     exe_mod.addAnonymousImport("countries", .{
         .root_source_file = b.addRunArtifact(generated).captureStdOut(),
     });
 
     const exe = b.addExecutable(.{
-        .name = "lua_test",
+        .name = "countries_naming_game",
         .root_module = exe_mod,
     });
 

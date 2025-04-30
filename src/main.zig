@@ -1,222 +1,11 @@
 const std = @import("std");
-const RawTerm = @import("RawTerm");
-const ansi = RawTerm.ansi;
+const vaxis = @import("vaxis");
+const countries = @import("country.zig");
+const Country = countries.Country;
 
-const Continent = enum {
-    africa,
-    asia,
-    europe,
-    north_america,
-    oceania,
-    insular_oceania,
-    south_america,
-
-    pub fn name(continent: Continent) []const u8 {
-        return switch (continent) {
-            .africa => "Africa",
-            .asia => "Asia",
-            .europe => "Europe",
-            .north_america => "North America",
-            .oceania => "Oceania",
-            .insular_oceania => "Insular Oceania",
-            .south_america => "South America",
-        };
-    }
-
-    const by_name = blk: {
-        var kvs: []const struct { []const u8, Continent } = &.{};
-        for (std.enums.values(Continent)) |variant| {
-            kvs = kvs ++ .{.{ variant.name(), variant }};
-        }
-        break :blk std.StaticStringMap(Continent).initComptime(kvs);
-    };
-};
-
-const Country = struct {
-    name: []const u8,
-    capitals: []const []const u8,
-    continents: []const Continent,
-};
-
-const countries = blk: {
-    const raw_countries = @import("countries");
-
-    @setEvalBranchQuota(100_000);
-
-    const Entry = struct { []const u8, *const Country };
-    var by_name_kv_list: []const Entry = &.{};
-    var all: []const *const Country = &.{};
-
-    for (raw_countries.countries) |raw_country| {
-        var continents: []const Continent = &.{};
-        for (raw_country.continents) |continent| {
-            continents = continents ++ .{Continent.by_name.get(continent).?};
-        }
-
-        const country = Country{
-            .name = raw_country.primary_name,
-            .capitals = raw_country.capitals,
-            .continents = continents,
-        };
-
-        all = all ++ .{&country};
-
-        for (raw_country.alt_names ++ .{raw_country.primary_name}) |name| {
-            var lower: [name.len]u8 = undefined;
-            _ = std.ascii.lowerString(&lower, name);
-            const key: [name.len]u8 = lower;
-            by_name_kv_list = by_name_kv_list ++ @as([]const Entry, &.{Entry{ &key, &country }});
-        }
-    }
-
-    const Result = struct {
-        pub const countries = all;
-        pub const by_name = std.StaticStringMap(*const Country).initComptime(by_name_kv_list);
-
-        pub fn find(name: []const u8, buf: []u8) ?*const Country {
-            return by_name.get(std.ascii.lowerString(buf, name));
-        }
-
-        pub const ContinentMap = struct {
-            const Self = @This();
-
-            map: std.AutoHashMap(*const Country, void),
-
-            fn init(allocator: std.mem.Allocator) Self {
-                return .{ .map = .init(allocator) };
-            }
-
-            pub fn deinit(map: *Self) void {
-                map.map.deinit();
-            }
-
-            pub fn totalCount(map: *const Self) usize {
-                var total_count: usize = 0;
-
-                inline for (all) |country| {
-                    if (map.contains(country)) {
-                        total_count += 1;
-                    }
-                }
-
-                return total_count;
-            }
-
-            pub fn count(map: *const Self, comptime continent: Continent) struct { count: usize, total: usize } {
-                comptime var total_count: usize = 0;
-                var continent_count: usize = 0;
-
-                inline for (all) |country| {
-                    inline for (country.continents) |country_continent| {
-                        if (country_continent == continent) {
-                            total_count += 1;
-
-                            if (map.contains(country)) {
-                                continent_count += 1;
-                            }
-                        }
-                    }
-                }
-
-                return .{
-                    .count = continent_count,
-                    .total = total_count,
-                };
-            }
-
-            fn add(map: *Self, country: *const Country) !void {
-                try map.map.put(country, {});
-            }
-
-            fn contains(map: *const Self, country: *const Country) bool {
-                return map.map.contains(country);
-            }
-        };
-    };
-
-    break :blk Result;
-};
-
-const Input = struct {
-    buf: std.ArrayList(u8),
-    position: usize,
-
-    fn init(allocator: std.mem.Allocator) Input {
-        return .{
-            .buf = .init(allocator),
-            .position = 0,
-        };
-    }
-
-    fn deinit(input: *Input) void {
-        input.buf.deinit();
-    }
-
-    fn handleEvent(input: *Input, event: RawTerm.Event) !void {
-        input.position = @min(input.position, input.buf.items.len);
-        switch (event) {
-            .char => |char| if (char.ctrl) switch (char.value) {
-                'c' => input.buf.clearAndFree(),
-                'h' => {
-                    input.position -|= 1;
-                },
-                'l' => {
-                    input.position = @min(input.position + 1, input.buf.items.len);
-                },
-                else => {},
-            } else {
-                var buf: [4]u8 = undefined;
-                const len = try std.unicode.utf8Encode(char.value, &buf);
-                for (buf[0..len]) |byte| {
-                    try input.buf.insert(input.position, byte);
-                }
-                input.position += len;
-            },
-            .special => |key| switch (key.key) {
-                .backspace => {
-                    if (input.position >= 1) {
-                        _ = input.buf.orderedRemove(input.position - 1);
-                        input.position -= 1;
-                    }
-                },
-                .right => {
-                    input.position -|= 1;
-                },
-                .left => {
-                    input.position = @min(input.position + 1, input.buf.items.len);
-                },
-                else => {},
-            },
-            else => {},
-        }
-    }
-
-    pub fn format(
-        input: Input,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = options;
-        _ = fmt;
-
-        const position = @min(input.position, input.buf.items.len);
-
-        if (position == input.buf.items.len) {
-            try std.fmt.format(
-                writer,
-                "{s}" ++ ansi.style.reverse.enable ++ " " ++ ansi.style.reverse.disable,
-                .{input.buf.items},
-            );
-        } else {
-            const ch = input.buf.items[input.position];
-            try std.fmt.format(
-                writer,
-                "{s}" ++ ansi.style.reverse.enable ++ "{c}" ++ ansi.style.reverse.disable ++ "{s}",
-                .{ input.buf.items[0..position], ch, input.buf.items[position + 1 .. input.buf.items.len] },
-            );
-        }
-    }
+const Event = union(enum) {
+    key_press: vaxis.Key,
+    winsize: vaxis.Winsize,
 };
 
 const Hint = union(enum) {
@@ -252,18 +41,15 @@ const CheckResult = union(enum) {
 };
 
 const State = struct {
-    size: RawTerm.Size,
     map: countries.ContinentMap,
-    input: Input,
     last_found: ?*const Country = null,
     hint: Hint,
     elapsed_ns: u64,
 
-    pub fn check(state: *State) !CheckResult {
+    pub fn check(state: *State, name: []const u8) !CheckResult {
         var buf: [1024]u8 = undefined;
-        if (countries.find(state.input.buf.items, &buf)) |country| {
+        if (countries.find(name, &buf)) |country| {
             if (!state.map.contains(country)) {
-                state.input.buf.clearAndFree();
                 try state.map.add(country);
                 state.last_found = country;
                 return if (countries.countries.len == state.map.totalCount()) .finished else .{ .found = country };
@@ -273,42 +59,56 @@ const State = struct {
         return .not_found;
     }
 
-    pub fn fmtTime(elapsed_ns: u64, buf: []u8) ![]u8 {
+    pub fn fmtTime(elapsed_ns: u64, buf: []u8) []u8 {
         const secs = elapsed_ns / std.time.ns_per_s;
         const mins = elapsed_ns / std.time.ns_per_min;
         const hours = elapsed_ns / std.time.ns_per_hour;
-        if (hours == 0) {
-            return std.fmt.bufPrint(buf, "{:02}:{:02}", .{ mins % 60, secs % 60 });
-        } else {
-            return std.fmt.bufPrint(buf, "{}:{:02}:{:02}", .{ hours, mins % 60, secs % 60 });
-        }
+
+        return (if (hours == 0)
+            std.fmt.bufPrint(buf, "{:02}:{:02}", .{ mins % 60, secs % 60 })
+        else
+            std.fmt.bufPrint(buf, "{}:{:02}:{:02}", .{ hours, mins % 60, secs % 60 })) catch unreachable;
     }
 
-    pub fn render(state: *const State, raw_term: *RawTerm) !void {
-        try raw_term.out.writer().print(
-            ansi.clear.screen ++ ansi.cursor.goto_top_left ++ "\x1b[{}H",
-            .{(state.size.height -| 14) / 2 + 1},
-        );
+    pub fn render(state: *const State, window: vaxis.Window, input: *vaxis.widgets.TextInput) void {
+        window.clear();
 
-        try raw_term.out.writer().print("{s:^[1]}\n\r", .{ "Country Naming Game", state.size.width });
-
-        {
-            var buf: [32]u8 = undefined;
-            try raw_term.out.writer().print(
-                "\x1b[30m{s:^[1]}\n\r" ++ ansi.style.reset,
-                .{ try fmtTime(state.elapsed_ns, &buf), state.size.width },
-            );
+        const line_count = 15;
+        const center = vaxis.widgets.alignment.center(window, window.width, line_count);
+        var lines: [line_count]vaxis.Window = undefined;
+        inline for (0..line_count) |i| {
+            lines[i] = center.child(.{ .y_off = i, .height = 1 });
         }
 
-        inline for (comptime std.enums.values(Continent)) |continent| {
-            try raw_term.out.writer().print(ansi.style.bold.enable ++ "\n\r {s:<16}" ++ ansi.style.reset, .{continent.name()});
+        const title = "Country Naming Game";
+        _ = vaxis.widgets.alignment.center(lines[0], @intCast(title.len), 1).printSegment(.{ .text = title }, .{});
+
+        {
+            var buf: [10]u8 = undefined;
+            const time = fmtTime(state.elapsed_ns, &buf);
+            _ = vaxis.widgets.alignment.center(lines[1], @intCast(time.len), 1).printSegment(.{
+                .text = time,
+                .style = vaxis.Style{ .fg = .{ .index = 0 } },
+            }, .{});
+        }
+
+        inline for (comptime std.enums.values(countries.Continent), 0..) |continent, i| {
+            const name = comptime blk: {
+                var buf: [17]u8 = undefined;
+                const name = std.fmt.bufPrint(&buf, " {s:<16}", .{continent.name()}) catch unreachable;
+                const buf_runtime = buf;
+                break :blk buf_runtime[0..name.len];
+            };
+
+            const full = " " ** 1024;
+            const empty = "\u{00B7}" ** 1024;
 
             const count = state.map.count(continent);
-            const width = state.size.width -| 18;
-            const cells = try std.math.divCeil(usize, width * count.count, count.total);
+            const width = window.width -| 18;
+            const cells = std.math.divCeil(usize, width * count.count, count.total) catch unreachable;
 
             const progess = @as(f32, @floatFromInt(count.count)) / @as(f32, @floatFromInt(count.total));
-            const rgb: struct { u8, u8, u8 } = if (progess < 0.25) .{
+            const rgb: [3]u8 = if (progess < 0.25) .{
                 0xdc, 0x26, 0x26,
             } else if (progess < 0.5) .{
                 0xea, 0x58, 0x0c,
@@ -318,39 +118,68 @@ const State = struct {
                 0x84, 0xcc, 0x16,
             };
 
-            try raw_term.out.writer().print(ansi.style.bold.enable ++ "\x1B[48;2;{};{};{}m", .{ rgb[0], rgb[1], rgb[2] });
-
-            for (0..cells) |_| {
-                try raw_term.out.writeAll(" ");
-            }
-
-            try raw_term.out.writeAll(ansi.style.reset ++ "\x1b[30m");
-
-            for (0..width - cells) |_| {
-                try raw_term.out.writeAll("\u{00B7}");
-            }
-
-            try raw_term.out.writeAll(ansi.style.reset);
+            _ = lines[3 + i].print(&.{
+                .{
+                    .text = name,
+                    .style = vaxis.Style{ .bold = true },
+                },
+                .{
+                    .text = full[0..cells],
+                    .style = vaxis.Style{ .bg = .{ .rgb = rgb } },
+                },
+                .{
+                    .text = empty[0 .. (width - cells) * "\u{00B7}".len],
+                    .style = vaxis.Style{ .fg = .{ .index = 0 } },
+                },
+            }, .{});
         }
 
-        try raw_term.out.writer().print(
-            "\n\n\r{s:<[1]}> {2} <\n\r",
-            .{ "", (state.size.width -| state.input.buf.items.len) / 2 -| 2, state.input },
-        );
-
-        if (state.last_found) |country| {
-            try raw_term.out.writer().print("\n\r Found {s} ({}/{})", .{ country.name, state.map.totalCount(), countries.countries.len });
+        {
+            const input_len: u16 = @truncate(input.buf.realLength() + 1);
+            const win = vaxis.widgets.alignment.center(lines[11], input_len + 4, 1);
+            _ = win.child(.{}).printSegment(.{ .text = "> " }, .{});
+            input.draw(win.child(.{ .x_off = 2 }));
+            _ = win.child(.{}).printSegment(.{ .text = " <" }, .{ .col_offset = input_len + 2 });
         }
 
         switch (state.hint) {
             .capital => |capital| {
                 const country = capital.country;
-                if (country.capitals.len > capital.index) {
-                    try raw_term.out.writer().print(ansi.style.bold.enable ++ "\n\r Hint:" ++ ansi.style.reset ++ " {s} is the capital of a country which hasn't been found", .{country.capitals[capital.index]});
-                } else {
-                    try raw_term.out.writeAll(ansi.style.bold.enable ++ "\n\r Hint:" ++ ansi.style.reset ++ " a country without a capital city has not been found");
-                }
+                var buf: [64]u8 = undefined;
+
+                const hint = if (country.capitals.len > capital.index)
+                    std.fmt.bufPrint(
+                        &buf,
+                        "{s} is the capital of an unfound country",
+                        .{country.capitals[capital.index]},
+                    ) catch unreachable
+                else
+                    "an unfound country does not have a capital city";
+
+                _ = lines[13].print(&.{
+                    .{
+                        .text = " Hint: ",
+                        .style = vaxis.Style{ .bold = true },
+                    },
+                    .{
+                        .text = hint,
+                    },
+                }, .{});
             },
+        }
+
+        if (state.last_found) |country| {
+            var buf: [256]u8 = undefined;
+            _ = lines[14].print(
+                &.{.{
+                    .text = std.fmt.bufPrint(
+                        &buf,
+                        " Found {s} ({}/{})",
+                        .{ country.name, state.map.totalCount(), countries.countries.len },
+                    ) catch unreachable,
+                }},
+                .{},
+            );
         }
     }
 };
@@ -359,77 +188,142 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var raw_term = try RawTerm.enable(std.io.getStdIn(), std.io.getStdOut(), false);
-    defer raw_term.disable() catch {};
+    var tty = try vaxis.Tty.init();
+    defer tty.deinit();
 
-    var listener = try raw_term.eventListener(allocator);
-    defer listener.deinit();
+    var vx = try vaxis.init(allocator, .{});
+    defer vx.deinit(allocator, tty.anyWriter());
 
-    try raw_term.out.writeAll(ansi.alternate_screen.enable ++ ansi.cursor.hide);
-    defer raw_term.out.writeAll(ansi.alternate_screen.disable ++ ansi.cursor.show) catch {};
+    var loop = vaxis.Loop(Event){
+        .tty = &tty,
+        .vaxis = &vx,
+    };
+    try loop.init();
+
+    try loop.start();
+    defer loop.stop();
+
+    try vx.enterAltScreen(tty.anyWriter());
+    try vx.queryTerminal(tty.anyWriter(), 1 * std.time.ns_per_s);
+
+    vx.setTitle(tty.anyWriter(), "countries naming game") catch {};
 
     var rng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
 
     const map = countries.ContinentMap.init(allocator);
 
+    var input: vaxis.widgets.TextInput = .init(allocator, &vx.unicode);
+    defer input.deinit();
+
     var state = State{
-        .size = try raw_term.size(),
         .map = map,
-        .input = .init(allocator),
         .hint = .new(&map, rng.random()),
         .elapsed_ns = 0,
     };
     defer state.map.deinit();
-    defer state.input.deinit();
+
+    // for (countries.countries[0 .. countries.countries.len - 1]) |country| {
+    //     try state.map.add(country);
+    // }
+
+    // state.hint = .new(&state.map, rng.random());
 
     var timer = try std.time.Timer.start();
 
-    try state.render(&raw_term);
+    while (true) {
+        const event = loop.nextEvent();
+        switch (event) {
+            .key_press => |key| if (key.matches('c', .{ .ctrl = true })) return,
+            .winsize => |ws| {
+                try vx.resize(allocator, tty.anyWriter(), ws);
+                break;
+            },
+        }
+    }
+
+    var bw = tty.bufferedWriter();
+
+    {
+        const window = vx.window();
+        state.render(window, &input);
+
+        try vx.render(bw.writer().any());
+        try bw.flush();
+    }
 
     while (true) {
-        const event = try listener.queue.wait();
+        const event = loop.nextEvent();
         state.elapsed_ns = timer.read();
         switch (event) {
-            .resize => {
-                state.size = try raw_term.size();
-            },
-            .char => |char| switch (char.value) {
-                '\r' => {
-                    switch (try state.check()) {
-                        .found => |country| switch (state.hint) {
-                            .capital => |capital| if (capital.country == country) {
-                                state.hint = .new(&state.map, rng.random());
-                            },
+            .key_press => |key| {
+                if (key.matches('q', .{ .ctrl = true })) {
+                    return;
+                } else if (key.matches('c', .{ .ctrl = true })) {
+                    input.clearAndFree();
+                } else if (key.matches(vaxis.Key.enter, .{})) {
+                    const first_half = input.buf.firstHalf();
+                    const second_half = input.buf.secondHalf();
+                    const name = try allocator.alloc(u8, first_half.len + second_half.len);
+                    defer allocator.free(name);
+                    @memcpy(name[0..first_half.len], first_half);
+                    @memcpy(name[first_half.len..], second_half);
+
+                    switch (try state.check(name)) {
+                        .found => |country| {
+                            input.clearAndFree();
+                            switch (state.hint) {
+                                .capital => |capital| if (capital.country == country) {
+                                    state.hint = .new(&state.map, rng.random());
+                                },
+                            }
                         },
                         .not_found => {},
                         .finished => {
-                            var buf: [32]u8 = undefined;
+                            var buf: [2048]u8 = undefined;
                             while (true) {
-                                try raw_term.out.writeAll(ansi.clear.screen ++ ansi.cursor.goto_top_left ++ "You won (press any key to exit)");
-                                try raw_term.out.writer().print("\n\rTime: {s}", .{try State.fmtTime(state.elapsed_ns, &buf)});
-                                const ev = try listener.queue.wait();
-                                switch (ev) {
-                                    .resize => {},
-                                    else => break,
+                                const window = vx.window();
+                                window.clear();
+                                window.hideCursor();
+
+                                var time_buf: [10]u8 = undefined;
+                                const time = State.fmtTime(state.elapsed_ns, &time_buf);
+
+                                _ = window.print(&.{.{
+                                    .text = std.fmt.bufPrint(
+                                        &buf,
+                                        \\You won (press any key to exit)
+                                        \\Time: {s}
+                                    ,
+                                        .{time},
+                                    ) catch unreachable,
+                                }}, .{});
+
+                                try vx.render(bw.writer().any());
+                                try bw.flush();
+
+                                switch (loop.nextEvent()) {
+                                    .winsize => |ws| {
+                                        try vx.resize(allocator, tty.anyWriter(), ws);
+                                    },
+                                    .key_press => break,
                                 }
                             }
                             break;
                         },
                     }
-                },
-                'q' => if (char.ctrl) {
-                    break;
                 } else {
-                    try state.input.handleEvent(event);
-                },
-                else => {
-                    try state.input.handleEvent(event);
-                },
+                    try input.update(.{ .key_press = key });
+                }
             },
-            else => {
-                try state.input.handleEvent(event);
+            .winsize => |ws| {
+                try vx.resize(allocator, tty.anyWriter(), ws);
             },
         }
-        try state.render(&raw_term);
+
+        const window = vx.window();
+        state.render(window, &input);
+
+        try vx.render(bw.writer().any());
+        try bw.flush();
     }
 }
